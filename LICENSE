@@ -1,0 +1,15 @@
+RayZen Vortex Server
+Copyright (c) 2026 RayZen Vortex-53 contributors
+
+The release files published in this repository (the vortex-server binary, install.sh / vortexctl and
+the documentation) may be downloaded, installed and run free of charge, for personal or commercial
+use, on any number of servers, and may be redistributed unmodified together with this LICENSE and
+NOTICE.
+
+The software is provided "as is", without warranty of any kind, express or implied, including but not
+limited to the warranties of merchantability, fitness for a particular purpose and noninfringement. In
+no event shall the authors or copyright holders be liable for any claim, damages or other liability,
+whether in an action of contract, tort or otherwise, arising from, out of or in connection with the
+software or the use or other dealings in the software.
+
+Third-party components keep their own licences; see NOTICE.
