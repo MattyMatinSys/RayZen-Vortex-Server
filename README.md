@@ -2,16 +2,16 @@
 
 [فارسی](README.fa.md)
 
-A fast DNS-tunnel server for the **RayZen Vortex-53** Android app (v1.4.0 or newer), installed on a Linux VPS with one command. It is ready in about a minute.
+A fast DNS-tunnel server for the **RayZen Vortex-53** Android app (v1.4.0 or newer), installed on a Linux VPS with one command. Installation time varies by system and network.
 
-- **Faster, lower latency, fewer drops:** tuned response handling (keep-alive PINGs answered without extra round trips), kernel UDP buffers and BBR set for you, and a watchdog that restarts the service only if real DNS answers stop.
+- **Service recovery:** a watchdog restarts the service when its DNS health checks stop succeeding. Performance depends on the network and resolver.
 - **Several domains:** add more domains to the same server. The app tests them all, uses the fastest and moves on if one gets blocked.
-- **Nothing compiled on your VPS:** a ready `linux/amd64` binary is downloaded and checked against its SHA-256 before it runs.
+- **Nothing compiled on your VPS:** ready `linux/amd64` and `linux/arm64` binaries is downloaded and checked against its SHA-256 before it runs.
 - **Upgrade in place:** an older Vortex-53 server on the same VPS is upgraded and keeps its key and domain.
 
 ## Requirements
 
-- A VPS with a public IPv4 address running a systemd Linux (Ubuntu 20.04+ or Debian 11+), **x86_64**.
+- A VPS with a public IPv4 address running a systemd Linux (Ubuntu 20.04+ or Debian 11+), **x86_64** or **arm64**.
 - UDP port 53 reachable from the internet (open it in your provider's firewall panel too).
 - A domain whose DNS you control.
 
@@ -67,6 +67,7 @@ sha256sum -c SHA256SUMS
 
 ## Limits
 
+- The current StormDNS/Vortex tunnel does not encrypt or authenticate downstream DNS response frames, even when AES-GCM is selected for query-side data. Use application-layer TLS for sensitive traffic; the tunnel itself does not provide end-to-end confidentiality or authentication.
 - linux/amd64 only.
 - The link carries the server key: share it only with people you trust.
 - How fast it is depends on the resolvers your phone's network allows; on a heavily filtered network add a second domain and use the app's resolver scanner.

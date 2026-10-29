@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# RayZen Vortex server — one-command installer and manager for a Linux VPS (x86_64, systemd).
+# RayZen Vortex server — one-command installer and manager for a Linux VPS (x86_64 or arm64, systemd).
 #
 #   curl -fsSL https://github.com/MattyMatinSys/RayZen-Vortex-Server/releases/latest/download/install.sh \
 #     | sudo bash -s -- --domain t.example.com
@@ -25,6 +25,7 @@ set -euo pipefail
 # Filled in by the release workflow; a copy from the repo falls back to the latest release.
 RELEASE_VERSION="__VORTEX_VERSION__"
 RELEASE_SHA256="__VORTEX_SHA256__"
+RELEASE_SHA256_ARM64="__VORTEX_SHA256_ARM64__"
 REPO="${VORTEX_REPO:-MattyMatinSys/RayZen-Vortex-Server}"
 ASSET="vortex-server-linux-amd64"
 
@@ -49,7 +50,7 @@ WANT_VERSION=""
 FROM_DIR=""
 YES=0
 DNS_CHECK=1
-TUNE=1
+TUNE=0 # v2: no blanket kernel tuning unless --tune is given
 PURGE=0
 PIN=1 # install: use the release this script belongs to; update: latest unless --version
 ARGS=()
@@ -91,7 +92,8 @@ check_platform() {
   [ "$(uname -s)" = Linux ] || die "Linux only"
   case "${VORTEX_TEST_ARCH:-$(uname -m)}" in
     x86_64 | amd64) ;;
-    *) die "this release supports standard Intel/AMD (x86_64) servers only; this server is $(uname -m)" ;;
+    aarch64 | arm64) ASSET="vortex-server-linux-arm64" RELEASE_SHA256=$RELEASE_SHA256_ARM64 ;;
+    *) die "this release supports x86_64 and arm64 servers only; this server is $(uname -m)" ;;
   esac
   command -v systemctl > /dev/null || die "systemd is required"
   local os_id="" os_name=""
@@ -125,6 +127,7 @@ parse() {
       --yes | -y) YES=1 ;;
       --no-dns-check) DNS_CHECK=0 ;;
       --no-tune) TUNE=0 ;;
+      --tune) TUNE=1 ;;
       --purge) PURGE=1 ;;
       -h | --help) usage; exit 0 ;;
       --*) die "unknown option $1 (see --help)" ;;
@@ -141,16 +144,19 @@ RayZen Vortex server installer / manager (vortexctl)
 
   install (default)        install or upgrade:  --domain t.example.com [--domain t2.example.net]
   link                     print the connection link (app v1.4.0 or newer)
-  status                   service state, live counters and a real tunnel self test
+  status                   service state, version, domains, sessions, uptime and a real tunnel self test
+  doctor                   check dependencies, DNS delegation, port 53, firewall, config and service (with fixes)
+  bench                    loopback tunnel throughput (download and upload)
+  rollback                 restore the previous binary and config
   check-dns                check that the domains are delegated to this server
   add-domain D | remove-domain D
-  update [--version X.Y.Z] download a newer release, verify it and restart
+  update [--version X.Y.Z] download, verify SHA-256, back up, swap, restart; rolls back if health fails
   rotate-key               make a new key (every old link stops working)
   backup | logs [N] | uninstall [--purge] | uninstall-legacy
 
 Install options: --port 53  --ip PUBLIC_IP  --name "Profile name"  --ns-host ns.example.com
   --version X.Y.Z  --from DIR (offline: vortex-server-linux-amd64 + SHA256SUMS in DIR)
-  --yes (no questions)  --no-dns-check  --no-tune
+  --yes (no questions)  --no-dns-check  --tune (opt-in UDP buffer / BBR sysctl tuning)
 USAGE
 }
 
@@ -201,6 +207,7 @@ install_binary() {
   download_binary "$t"
   "$t/vortex-server" version > /dev/null 2>&1 || die "the downloaded binary does not run on this server"
   install -d "$(dirname "$BIN")"
+  [ -x "$BIN" ] && cp -f "$BIN" "$BIN.prev"
   install -m 755 "$t/vortex-server" "$BIN.new" && mv -f "$BIN.new" "$BIN"
   rm -rf "$t"
   ok "installed $("$BIN" version)"
@@ -220,7 +227,8 @@ install_ctl() {
     rm -f "$t"
   fi
   if [ -x "$CTL" ]; then
-    ok "manager command: vortexctl ($CTL)"
+    ln -sf "$CTL" "$(dirname "$CTL")/vortex" 2> /dev/null || true
+    ok "manager command: vortexctl / vortex ($CTL)"
   else
     warn "could not install vortexctl; re-run the install command to manage the server"
   fi
@@ -562,12 +570,79 @@ cmd_update() {
   local old
   old=$("$BIN" version 2> /dev/null || echo none)
   [ -n "$WANT_VERSION" ] || PIN=0
+  backup_to "$ETC.prev.tar.gz"
   install_binary
   install_ctl refresh
   write_unit
-  restart_service
-  "$BIN" selfcheck --config "$CFG" || die "self test failed after the update: journalctl -u vortex-server -n 50"
+  if ! systemctl restart vortex-server || ! health_ok; then
+    warn "health check failed after the update; rolling back to $old"
+    cmd_rollback
+    die "update failed and was rolled back: journalctl -u vortex-server -n 50"
+  fi
   ok "updated: $old -> $("$BIN" version)"
+}
+
+health_ok() {
+  local _
+  for _ in 1 2 3 4 5; do
+    systemctl is-active -q vortex-server && "$BIN" selfcheck --config "$CFG" > /dev/null 2>&1 && return 0
+    sleep 2
+  done
+  return 1
+}
+
+backup_to() { # backup_to FILE: config + key archive, mode 0600
+  (umask 077 && tar -czf "$1" -C / "${ETC#/}") && chmod 600 "$1"
+}
+
+cmd_rollback() {
+  need_root
+  [ -x "$BIN.prev" ] || die "no previous binary to roll back to"
+  cp -f "$BIN.prev" "$BIN.new" && mv -f "$BIN.new" "$BIN"
+  [ -f "$ETC.prev.tar.gz" ] && tar -xzf "$ETC.prev.tar.gz" -C / && fix_perms
+  systemctl restart vortex-server || true
+  if health_ok; then ok "rolled back to $("$BIN" version)"; else warn "rolled back, but the service is still unhealthy: journalctl -u vortex-server -n 50"; fi
+}
+
+cmd_doctor() {
+  need_root
+  local bad=0
+  chk() { # chk "what" "fix hint" command...
+    local what=$1 hint=$2
+    shift 2
+    if "$@" > /dev/null 2>&1; then ok "$what"; else warn "$what: FAILED -> $hint"; bad=1; fi
+  }
+  for c in systemctl ss sha256sum tar; do chk "dependency $c" "install it with your package manager (apt install ...)" command -v "$c"; done
+  chk "download tool (curl or wget)" "apt install curl" sh -c 'command -v curl || command -v wget'
+  chk "config $CFG" "re-run the install command, or restore with: vortexctl rollback" "$BIN" domain list --config "$CFG"
+  chk "service vortex-server active" "systemctl restart vortex-server; journalctl -u vortex-server -n 50" systemctl is-active -q vortex-server
+  local p owner
+  p=$(sed -nE 's/^UDP_PORT *= *([0-9]+).*/\1/p' "$CFG" 2> /dev/null | head -1)
+  PORT=${p:-$PORT}
+  owner=$(port_owner)
+  if [ "$owner" = vortex-server ]; then ok "UDP/$PORT bound by vortex-server"; else
+    warn "UDP/$PORT: owned by '${owner:-nobody}' -> stop the other service (systemctl disable --now <it>) and run: systemctl restart vortex-server"
+    bad=1
+  fi
+  if command -v ufw > /dev/null && ufw status 2> /dev/null | grep -q "Status: active"; then
+    chk "ufw allows $PORT/udp" "ufw allow $PORT/udp" sh -c "ufw status | grep -qE '^$PORT/udp'"
+  else
+    log "no active ufw; make sure UDP $PORT is open in your provider's firewall panel"
+  fi
+  chk "DNS delegation of every domain" "add the A/NS records shown by: vortexctl check-dns" "$BIN" check-dns --config "$CFG"
+  chk "tunnel self test" "journalctl -u vortex-server -n 50" "$BIN" selfcheck --config "$CFG"
+  if [ "$bad" = 0 ]; then
+    ok "doctor: everything looks fine"
+  else
+    warn "doctor: problems found (fixes above)"
+    return 1
+  fi
+}
+
+cmd_bench() {
+  need_root
+  [ -f "$CFG" ] || die "not installed"
+  "$BIN" bench --config "$CFG"
 }
 
 cmd_rotate_key() {
@@ -585,8 +660,8 @@ cmd_backup() {
   [ -d "$ETC" ] || die "not installed"
   local out
   out="/root/vortex-server-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
-  (umask 077 && tar -czf "$out" -C / "${ETC#/}")
-  ok "backup written to $out (it contains the server key: keep it private)"
+  backup_to "$out"
+  ok "backup written to $out (mode 0600; it contains the server key: keep it private)"
 }
 
 cmd_logs() { journalctl -u vortex-server -n "${ARGS[1]:-100}" --no-pager; }
@@ -595,7 +670,7 @@ cmd_uninstall() {
   need_root
   confirm "Remove the Vortex server from this machine?" || die "cancelled"
   systemctl disable --now vortex-server > /dev/null 2>&1 || true
-  rm -f "$UNIT" "$BIN" "$SYSCTL_FILE"
+  rm -f "$UNIT" "$BIN" "$BIN.prev" "$SYSCTL_FILE" "$(dirname "$CTL")/vortex"
   systemctl daemon-reload
   if [ -f "$RESOLVED_DROPIN" ]; then
     rm -f "$RESOLVED_DROPIN"
@@ -637,6 +712,9 @@ main() {
     update | upgrade) cmd_update ;;
     rotate-key) cmd_rotate_key ;;
     backup) cmd_backup ;;
+    doctor) cmd_doctor ;;
+    bench) cmd_bench ;;
+    rollback) cmd_rollback ;;
     logs) cmd_logs ;;
     uninstall) cmd_uninstall ;;
     uninstall-legacy) cmd_uninstall_legacy ;;
