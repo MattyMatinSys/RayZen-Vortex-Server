@@ -96,6 +96,7 @@ check_platform() {
     *) die "this release supports x86_64 and arm64 servers only; this server is $(uname -m)" ;;
   esac
   command -v systemctl > /dev/null || die "systemd is required"
+  command -v ss > /dev/null || die "ss is required to check the UDP port (install the iproute2 package)"
   local os_id="" os_name=""
   if [ -r /etc/os-release ]; then
     # Read in a subshell: os-release defines NAME, which is also our --name option.
@@ -288,9 +289,10 @@ legacy_friends() {
 port_owner() { ss -H -lunp "sport = :$PORT" 2> /dev/null | grep -oE 'users:\(\("[^"]+"' | head -1 | sed -E 's/^users:\(\("//; s/"$//'; }
 
 free_port() {
-  local owner
+  local owner sockets
+  sockets=$(ss -H -lunp "sport = :$PORT" 2> /dev/null) || die "could not inspect UDP/$PORT with ss"
+  [ -n "$sockets" ] || return 0
   owner=$(port_owner || true)
-  [ -n "$owner" ] || return 0
   case "$owner" in
     vortex-server) return 0 ;;
     systemd-resolve*)
@@ -304,9 +306,10 @@ free_port() {
       sleep 1
       ;;
   esac
+  sockets=$(ss -H -lunp "sport = :$PORT" 2> /dev/null) || die "could not inspect UDP/$PORT with ss"
   owner=$(port_owner || true)
-  if [ -n "$owner" ] && [ "$owner" != vortex-server ]; then
-    die "UDP/$PORT is used by '$owner'. Stop it (systemctl disable --now <service>) and run the command again."
+  if [ -n "$sockets" ] && [ "$owner" != vortex-server ]; then
+    die "UDP/$PORT is already in use by '${owner:-an unknown process}'. Stop it and run the command again."
   fi
 }
 
@@ -398,7 +401,8 @@ restart_service() {
   systemctl enable -q vortex-server 2> /dev/null || true
   if ! systemctl restart vortex-server; then
     journalctl -u vortex-server -n 30 --no-pager 2> /dev/null || true
-    die "vortex-server did not start (log above)"
+    warn "vortex-server did not start (log above)"
+    return 1
   fi
   ok "vortex-server is running"
 }
@@ -439,12 +443,24 @@ show_link() {
   "$BIN" link --config "$CFG"
 }
 
+rollback_install_on_exit() {
+  local rc=$?
+  trap - EXIT
+  if [ "$rc" -ne 0 ] && [ "${INSTALL_ROLLBACK_ARMED:-0}" = 1 ]; then
+    warn "upgrade failed; restoring the previous binary and configuration"
+    set +e
+    cmd_rollback
+  fi
+  exit "$rc"
+}
+
 # ---- commands ----
 cmd_install() {
   need_root
   check_platform
-  local t0=$SECONDS upgrading=0
+  local t0=$SECONDS upgrading=0 had_binary=0
   [ -f "$CFG" ] && upgrading=1
+  [ -x "$BIN" ] && had_binary=1
 
   if [ $upgrading = 0 ] && legacy_detect; then
     log "found the older Vortex-53 server in $LEGACY (domain ${LEGACY_DOMAIN:-unknown}); upgrading it in place"
@@ -466,7 +482,18 @@ cmd_install() {
     DOMAINS=("$d")
   fi
 
+  if [ "$upgrading" = 1 ]; then
+    PORT=$(sed -nE 's/^UDP_PORT *= *([0-9]+).*/\1/p' "$CFG" | head -1)
+    [ -n "$PORT" ] || die "could not read UDP_PORT from $CFG"
+    free_port
+    backup_to "$ETC.prev.tar.gz"
+  fi
+
   install_binary
+  if [ "$upgrading" = 1 ] && [ "$had_binary" = 1 ] && [ -x "$BIN.prev" ]; then
+    INSTALL_ROLLBACK_ARMED=1
+    trap rollback_install_on_exit EXIT
+  fi
   install_ctl
   ensure_user
   install -d -m 750 "$ETC"
@@ -502,9 +529,9 @@ cmd_install() {
   open_firewall
   tune_kernel
   write_unit
-  restart_service
-
-  "$BIN" selfcheck --config "$CFG" || die "self test failed: journalctl -u vortex-server -n 50"
+  if ! restart_service || ! "$BIN" selfcheck --config "$CFG"; then
+    die "service start or self test failed: journalctl -u vortex-server -n 50"
+  fi
   local dns_rc=0
   dns_check || dns_rc=$?
   if [ $dns_rc = 0 ]; then
@@ -513,6 +540,8 @@ cmd_install() {
   show_link
   echo
   ok "ready in $((SECONDS - t0))s. Manage it with: sudo vortexctl status | link | add-domain | update"
+  INSTALL_ROLLBACK_ARMED=0
+  trap - EXIT
 }
 
 cmd_link() {

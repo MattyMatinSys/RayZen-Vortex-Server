@@ -6,12 +6,12 @@ A fast DNS-tunnel server for the **RayZen Vortex-53** Android app (v1.4.0 or new
 
 - **Service recovery:** a watchdog restarts the service when its DNS health checks stop succeeding. Performance depends on the network and resolver.
 - **Several domains:** add more domains to the same server. The app tests them all, uses the fastest and moves on if one gets blocked.
-- **Nothing compiled on your VPS:** ready `linux/amd64` and `linux/arm64` binaries is downloaded and checked against its SHA-256 before it runs.
+- **Nothing compiled on your VPS:** a ready `linux/amd64` or `linux/arm64` binary is downloaded and checked against its SHA-256 before it runs.
 - **Upgrade in place:** an older Vortex-53 server on the same VPS is upgraded and keeps its key and domain.
 
 ## Requirements
 
-- A VPS with a public IPv4 address running a systemd Linux (Ubuntu 20.04+ or Debian 11+), **x86_64** or **arm64**.
+- A VPS with a public IPv4 address, `ss` (from iproute2), and a systemd Linux (Ubuntu 20.04+ or Debian 11+), **x86_64** or **arm64**.
 - UDP port 53 reachable from the internet (open it in your provider's firewall panel too).
 - A domain whose DNS you control.
 
@@ -68,10 +68,15 @@ sha256sum -c SHA256SUMS
 ## Limits
 
 - The current StormDNS/Vortex tunnel does not encrypt or authenticate downstream DNS response frames, even when AES-GCM is selected for query-side data. Use application-layer TLS for sensitive traffic; the tunnel itself does not provide end-to-end confidentiality or authentication.
-- linux/amd64 only.
 - The link carries the server key: share it only with people you trust.
 - How fast it is depends on the resolvers your phone's network allows; on a heavily filtered network add a second domain and use the app's resolver scanner.
 
 ## Licence
 
 See [LICENSE](LICENSE) and [NOTICE](NOTICE). Built on StormDNS (MIT).
+
+## Build from source
+
+The server-only source, reproducible build commands, test scope, and architecture details are documented in [BUILD.md](BUILD.md). The Android application and its private code are not included.
+
+The local status/self-check performs MTU probes and establishes a temporary tunnel session. A passing local test does not establish that a remote resolver or mobile network can reach the server. `vortexctl bench` measures DNS probe payload rates, not application throughput.
