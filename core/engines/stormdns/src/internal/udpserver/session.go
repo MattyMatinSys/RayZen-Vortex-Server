@@ -425,12 +425,14 @@ func (s *sessionStore) ValidateAndTouch(sessionID uint8, cookie uint8, now time.
 	return sessionValidationResult{}
 }
 
-func (s *sessionStore) Close(sessionID uint8, now time.Time, retention time.Duration) (*sessionRecord, bool) {
+// Close checks the cookie under the same lock that removes the session. A
+// separate Lookup followed by Close can otherwise close a newly reused ID.
+func (s *sessionStore) Close(sessionID uint8, cookie uint8, now time.Time, retention time.Duration) (*sessionRecord, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	record := s.byID[sessionID]
-	if record == nil {
+	if record == nil || record.Cookie != cookie {
 		return nil, false
 	}
 	record.markClosed()

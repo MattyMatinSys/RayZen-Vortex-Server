@@ -70,12 +70,7 @@ func (s *Server) handleSessionCloseNotice(vpnPacket VpnProto.Packet, now time.Ti
 		return
 	}
 
-	lookup, known := s.sessions.Lookup(vpnPacket.SessionID)
-	if !known || lookup.State != sessionLookupActive || lookup.Cookie != vpnPacket.SessionCookie {
-		return
-	}
-
-	record, ok := s.sessions.Close(vpnPacket.SessionID, now, s.cfg.ClosedSessionRetention())
+	record, ok := s.sessions.Close(vpnPacket.SessionID, vpnPacket.SessionCookie, now, s.cfg.ClosedSessionRetention())
 	if !ok {
 		return
 	}
